@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">North</string>
+    <string name="widget_label">Compass</string>
+    <string name="widget_desc">An arrow that points magnetic north, true north, or Manhattan uptown.</string>
+    <string name="arrow">North</string>
+    <string name="compass_channel">Compass</string>
+    <string name="compass_notif">Compass is on</string>
+    <string name="preview_note">This screen follows the phone while it is open. Each home-screen Compass widget keeps the settings you choose when you place it.</string>
+    <string name="add_hint">Long-press the home screen, choose Widgets, then North.</string>
+    <string name="configure_title">Compass</string>
+    <string name="mode_magnetic">Magnetic north</string>
+    <string name="mode_true">True north</string>
+    <string name="mode_grid">Manhattan grid</string>
+    <string name="declination_looking">Looking up declination…</string>
+    <string name="declination_unavailable">Declination is unavailable until the lookup succeeds.</string>
+    <string name="declination_value">Declination %1$.1f° %2$s</string>
+    <string name="side_west">west</string>
+    <string name="side_east">east</string>
+    <string name="location_note">True north looks up today’s declination from NOAA for your location. That repeats after about 20 miles or a week. Manhattan grid uses the same declination and checks location while the screen is on.</string>
+    <string name="save">Save</string>
+</resources>
