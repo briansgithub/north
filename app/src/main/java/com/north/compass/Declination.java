@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 final class Declination {
     interface Listener {
@@ -27,10 +28,12 @@ final class Declination {
     private static final long RETRY_MS = 10L * 60 * 1000;
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
     private static final AtomicBoolean BUSY = new AtomicBoolean(false);
+    private static final AtomicInteger IN_FLIGHT = new AtomicInteger();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private static volatile float east = Float.NaN;
     private static volatile boolean failed;
+    private static volatile boolean checking;
     private static boolean loaded;
     private static double cachedLat;
     private static double cachedLon;
@@ -56,8 +59,15 @@ final class Declination {
         load(context.getApplicationContext());
     }
 
+    static boolean checking() {
+        return checking;
+    }
+
     static String status(Context context) {
         ensureLoaded(context);
+        if (checking) {
+            return context.getString(R.string.declination_looking);
+        }
         if (!Float.isNaN(east)) {
             String side = east < 0f
                     ? context.getString(R.string.side_west)
@@ -107,14 +117,64 @@ final class Declination {
                     retryAfter = 0L;
                     CompassWidgets.render(app, false);
                 }
-                Listener current = listener;
-                if (current != null) {
-                    MAIN.post(current::onDeclination);
-                }
+                notifyListener();
             } finally {
                 BUSY.set(false);
             }
         });
+    }
+
+    static void beginManual() {
+        checking = true;
+        notifyListener();
+    }
+
+    static void cancelManual() {
+        checking = false;
+        if (Float.isNaN(east)) {
+            failed = true;
+        }
+        notifyListener();
+    }
+
+    static void refresh(Context context, Location location) {
+        if (location == null) {
+            return;
+        }
+        Context app = context.getApplicationContext();
+        load(app);
+        retryAfter = 0L;
+        checking = true;
+        IN_FLIGHT.incrementAndGet();
+        notifyListener();
+        double lat = location.getLatitude();
+        double lon = location.getLongitude();
+        EXECUTOR.execute(() -> {
+            try {
+                float value = fetch(lat, lon);
+                if (Float.isNaN(value)) {
+                    failed = Float.isNaN(east);
+                    retryAfter = System.currentTimeMillis() + RETRY_MS;
+                } else {
+                    save(app, lat, lon, value);
+                    east = value;
+                    failed = false;
+                    CompassWidgets.render(app, false);
+                }
+            } finally {
+                if (IN_FLIGHT.decrementAndGet() == 0) {
+                    checking = false;
+                }
+                notifyListener();
+            }
+        });
+    }
+
+    private static void notifyListener() {
+        Listener current = listener;
+        if (current != null) {
+            MAIN.post(current::onDeclination);
+        }
     }
 
     private static void load(Context app) {

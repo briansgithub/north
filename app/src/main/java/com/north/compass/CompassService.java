@@ -28,11 +28,12 @@ public class CompassService extends Service implements SensorEventListener, Loca
     private static final int NOTIFICATION_ID = 48;
     private static final long LOCATION_INTERVAL_MS = 5 * 60 * 1000L;
     private static final float LOCATION_METERS = 400f;
+    private static final long COARSE_INTERVAL_MS = 15 * 60 * 1000L;
+    private static final float COARSE_METERS = 1500f;
     private static final int SPECIAL_USE = 1073741824;
 
     private static volatile Location lastLocation;
-    private static volatile float smoothedHeading = Float.NaN;
-    private static volatile boolean headingValid;
+    private static volatile float[] orientation;
 
     private HandlerThread thread;
     private SensorManager sensors;
@@ -48,11 +49,11 @@ public class CompassService extends Service implements SensorEventListener, Loca
     }
 
     static boolean hasHeading() {
-        return headingValid && !Float.isNaN(smoothedHeading);
+        return orientation != null;
     }
 
-    static float heading() {
-        return smoothedHeading;
+    static float[] orientation() {
+        return orientation;
     }
 
     static boolean hasWidgets(Context context) {
@@ -202,7 +203,11 @@ public class CompassService extends Service implements SensorEventListener, Loca
         }
         Declination.ensureLoaded(this);
         if (anyMode(WidgetStore.GRID)) {
-            return 2;
+            if (lastLocation == null
+                    || Avenues.trackClosely(lastLocation.getLatitude(), lastLocation.getLongitude())) {
+                return 2;
+            }
+            return 3;
         }
         if (anyMode(WidgetStore.TRUE) && !Declination.fresh(lastLocation)) {
             return 1;
@@ -292,8 +297,8 @@ public class CompassService extends Service implements SensorEventListener, Loca
         if (profile == 0 || locations == null) {
             return;
         }
-        long interval = profile == 2 ? LOCATION_INTERVAL_MS : 0L;
-        float meters = profile == 2 ? LOCATION_METERS : 0f;
+        long interval = profile == 2 ? LOCATION_INTERVAL_MS : profile == 3 ? COARSE_INTERVAL_MS : 0L;
+        float meters = profile == 2 ? LOCATION_METERS : profile == 3 ? COARSE_METERS : 0f;
         boolean fused = false;
         if (Build.VERSION.SDK_INT >= 31) {
             fused = request(LocationManager.FUSED_PROVIDER, interval, meters);
@@ -328,6 +333,8 @@ public class CompassService extends Service implements SensorEventListener, Loca
             locations.removeUpdates(this);
             locationListening = false;
             locationProfile = 0;
+        } else if (locationProfile == 2 || locationProfile == 3) {
+            syncLocation();
         }
         CompassWidgets.render(this, false);
     }
@@ -337,12 +344,7 @@ public class CompassService extends Service implements SensorEventListener, Loca
         if (event.sensor.getType() != Sensor.TYPE_ROTATION_VECTOR) {
             return;
         }
-        float heading = Heading.fromRotationVector(event.values);
-        if (Float.isNaN(heading)) {
-            return;
-        }
-        smoothedHeading = Heading.smooth(smoothedHeading, heading);
-        headingValid = true;
+        orientation = Heading.fromRotationVector(event.values);
         CompassWidgets.render(this, false);
     }
 
@@ -360,8 +362,7 @@ public class CompassService extends Service implements SensorEventListener, Loca
         if (thread != null) {
             thread.quitSafely();
         }
-        headingValid = false;
-        smoothedHeading = Float.NaN;
+        orientation = null;
         super.onDestroy();
     }
 

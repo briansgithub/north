@@ -12,6 +12,7 @@ import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
+import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.RadioGroup;
 import android.widget.TextView;
@@ -19,6 +20,8 @@ import android.widget.TextView;
 public class MainActivity extends android.app.Activity implements SensorEventListener, LocationListener, Declination.Listener {
     private static final long LOCATION_INTERVAL_MS = 5 * 60 * 1000L;
     private static final float LOCATION_METERS = 400f;
+    private static final long COARSE_INTERVAL_MS = 15 * 60 * 1000L;
+    private static final float COARSE_METERS = 1500f;
 
     private WidgetStore store;
     private SensorManager sensors;
@@ -26,13 +29,16 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
     private ImageView arrow;
     private RadioGroup modes;
     private TextView declinationStatus;
+    private Button recheck;
     private View locationNote;
     private boolean applying;
+    private boolean recheckWhenGranted;
     private boolean sensorOn;
     private boolean locating;
     private int locationProfile;
     private float smoothed = Float.NaN;
     private boolean headingOk;
+    private float[] orientation;
     private Location here;
 
     @Override
@@ -46,6 +52,9 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
         arrow.setAlpha(0.35f);
         modes = findViewById(R.id.modes);
         declinationStatus = findViewById(R.id.declination_status);
+        recheck = findViewById(R.id.recheck);
+        recheck.setVisibility(View.VISIBLE);
+        recheck.setOnClickListener(v -> recheckDeclination());
         locationNote = findViewById(R.id.location_note);
         TextView title = findViewById(R.id.title);
         TextView note = findViewById(R.id.note);
@@ -92,6 +101,7 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
         }
         stopLocation();
         headingOk = false;
+        orientation = null;
         smoothed = Float.NaN;
         super.onPause();
     }
@@ -111,9 +121,10 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
 
     private void showExtras() {
         boolean needs = WidgetStore.needsDeclination(currentMode());
-        declinationStatus.setVisibility(needs ? View.VISIBLE : View.GONE);
+        boolean showStatus = needs || Declination.checking() || Declination.known();
+        declinationStatus.setVisibility(showStatus ? View.VISIBLE : View.GONE);
         locationNote.setVisibility(needs ? View.VISIBLE : View.GONE);
-        if (needs) {
+        if (showStatus) {
             declinationStatus.setText(Declination.status(this));
         }
     }
@@ -153,6 +164,62 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
         publishLastKnown();
         syncLocation();
         paint();
+        if (requestCode == 1 && recheckWhenGranted && CompassService.hasLocationPermission(this)) {
+            recheckWhenGranted = false;
+            recheckDeclination();
+        }
+    }
+
+    private void recheckDeclination() {
+        if (locations == null) {
+            return;
+        }
+        if (!CompassService.hasLocationPermission(this)) {
+            recheckWhenGranted = true;
+            askForLocation();
+            return;
+        }
+        declinationStatus.setVisibility(View.VISIBLE);
+        Declination.beginManual();
+        String provider = Build.VERSION.SDK_INT >= 31
+                ? LocationManager.FUSED_PROVIDER
+                : LocationManager.GPS_PROVIDER;
+        requestCurrent(provider, true);
+    }
+
+    private void requestCurrent(String provider, boolean allowFallback) {
+        try {
+            locations.getCurrentLocation(provider, null, getMainExecutor(), location -> {
+                if (location != null) {
+                    applyRecheck(location);
+                    return;
+                }
+                if (allowFallback && LocationManager.FUSED_PROVIDER.equals(provider)) {
+                    requestCurrent(LocationManager.GPS_PROVIDER, false);
+                    return;
+                }
+                Location known = safeLast(LocationManager.GPS_PROVIDER);
+                if (known == null && Build.VERSION.SDK_INT >= 31) {
+                    known = safeLast(LocationManager.FUSED_PROVIDER);
+                }
+                if (known != null) {
+                    applyRecheck(known);
+                } else {
+                    Declination.cancelManual();
+                }
+            });
+        } catch (Exception error) {
+            if (allowFallback && Build.VERSION.SDK_INT >= 31) {
+                requestCurrent(LocationManager.GPS_PROVIDER, false);
+            } else {
+                Declination.cancelManual();
+            }
+        }
+    }
+
+    private void applyRecheck(Location location) {
+        here = location;
+        Declination.refresh(this, location);
     }
 
     private void publishLastKnown() {
@@ -185,7 +252,7 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
         int profile = 0;
         if (CompassService.hasLocationPermission(this)) {
             if (WidgetStore.GRID.equals(currentMode())) {
-                profile = 2;
+                profile = here == null || Avenues.trackClosely(here.getLatitude(), here.getLongitude()) ? 2 : 3;
             } else if (WidgetStore.TRUE.equals(currentMode()) && !Declination.fresh(here)) {
                 profile = 1;
             }
@@ -198,8 +265,8 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
         if (profile == 0 || locations == null) {
             return;
         }
-        long interval = profile == 2 ? LOCATION_INTERVAL_MS : 0L;
-        float meters = profile == 2 ? LOCATION_METERS : 0f;
+        long interval = profile == 2 ? LOCATION_INTERVAL_MS : profile == 3 ? COARSE_INTERVAL_MS : 0L;
+        float meters = profile == 2 ? LOCATION_METERS : profile == 3 ? COARSE_METERS : 0f;
         boolean fused = false;
         if (Build.VERSION.SDK_INT >= 31) {
             fused = request(LocationManager.FUSED_PROVIDER, interval, meters);
@@ -230,17 +297,23 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
     private void paint() {
         showExtras();
         String mode = currentMode();
-        if (!headingOk || (WidgetStore.needsDeclination(mode) && !Declination.known())) {
+        if (!headingOk || orientation == null || (WidgetStore.needsDeclination(mode) && !Declination.known())) {
             arrow.setAlpha(0.35f);
             arrow.setRotation(0f);
             return;
         }
         float uptown = Float.NaN;
-        if (here != null) {
+        if (WidgetStore.GRID.equals(mode) && here != null) {
             uptown = Avenues.uptownTrue(here.getLatitude(), here.getLongitude());
         }
+        float aim = Heading.arrowRotation(orientation, displayRotation(), mode, Declination.east(), uptown);
+        if (Float.isNaN(aim)) {
+            arrow.setAlpha(0.35f);
+            return;
+        }
+        smoothed = Heading.smooth(smoothed, aim);
         arrow.setAlpha(1f);
-        arrow.setRotation(Heading.arrowRotation(smoothed, mode, Declination.east(), uptown));
+        arrow.setRotation(smoothed);
     }
 
     @Override
@@ -248,13 +321,17 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
         paint();
     }
 
+    private int displayRotation() {
+        try {
+            return getSystemService(android.view.WindowManager.class).getDefaultDisplay().getRotation();
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
     @Override
     public void onSensorChanged(SensorEvent event) {
-        float heading = Heading.fromRotationVector(event.values);
-        if (Float.isNaN(heading)) {
-            return;
-        }
-        smoothed = Heading.smooth(smoothed, heading);
+        orientation = Heading.fromRotationVector(event.values);
         headingOk = true;
         paint();
     }
@@ -268,6 +345,8 @@ public class MainActivity extends android.app.Activity implements SensorEventLis
         Declination.note(this, location);
         if (locationProfile == 1) {
             stopLocation();
+        } else if (locationProfile == 2 || locationProfile == 3) {
+            syncLocation();
         }
         paint();
     }

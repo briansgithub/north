@@ -5,11 +5,21 @@ package com.north.compass;
  * The Fifth Avenue start and 59th Street corner are the points Charles Petzold
  * published in 2005; the rest are the same corners from a street geocoder.
  * On the 1811 grid the bearing is about 29 degrees. It changes above 155th
- * Street and below 14th Street.
+ * Street and below 14th Street. The result is that street's whole-degree
+ * uptown bearing. At an intersection the more northward street wins.
  */
 final class Avenues {
     private static final double LIMIT_MILES = 0.5;
+    private static final double INTERSECTION_MILES = 0.02;
+    private static final double TRACK_MILES = 1.0;
+    private static final double CACHE_MILES = 0.01;
     private static final double EARTH_MILES = 3958.8;
+
+    private static boolean cacheValid;
+    private static double cacheLat;
+    private static double cacheLon;
+    private static float cacheBearing = Float.NaN;
+    private static double cacheMiles = Double.POSITIVE_INFINITY;
 
     private static final Segment[][] SEGMENTS = {
             chain(40.73140, -73.99698, 40.76426, -73.97303, 40.796953, -73.949448, 40.814720, -73.936205),
@@ -24,19 +34,77 @@ final class Avenues {
 
     private Avenues() {}
 
+    /** Whole-degree true bearing of the nearest uptown street, or NaN outside Manhattan. */
     static float uptownTrue(double lat, double lon) {
-        double best = LIMIT_MILES;
-        float bearing = Float.NaN;
+        ensure(lat, lon);
+        return cacheBearing;
+    }
+
+    /** Close GPS is useful only inside or just beside the mapped streets. */
+    static boolean trackClosely(double lat, double lon) {
+        ensure(lat, lon);
+        return cacheMiles <= TRACK_MILES;
+    }
+
+    private static void ensure(double lat, double lon) {
+        if (cacheValid && miles(cacheLat, cacheLon, lat, lon) < CACHE_MILES) {
+            return;
+        }
+        double best = Double.POSITIVE_INFINITY;
+        Segment nearest = null;
         for (Segment[] chain : SEGMENTS) {
             for (Segment segment : chain) {
-            double miles = segment.milesFrom(lat, lon);
-            if (miles < best) {
-                best = miles;
-                bearing = (float) segment.uptown;
-            }
+                double miles = segment.milesFrom(lat, lon);
+                if (miles < best) {
+                    best = miles;
+                    nearest = segment;
+                }
             }
         }
-        return bearing;
+        float bearing = Float.NaN;
+        if (nearest != null && best <= LIMIT_MILES) {
+            Segment chosen = nearest;
+            double northward = angleFromNorth(nearest.uptown);
+            double window = best + INTERSECTION_MILES;
+            for (Segment[] chain : SEGMENTS) {
+                for (Segment segment : chain) {
+                    if (segment.milesFrom(lat, lon) > window) {
+                        continue;
+                    }
+                    double candidate = angleFromNorth(segment.uptown);
+                    if (candidate + 0.5 < northward) {
+                        chosen = segment;
+                        northward = candidate;
+                    }
+                }
+            }
+            int degrees = (int) Math.round(chosen.uptown) % 360;
+            if (degrees < 0) {
+                degrees += 360;
+            }
+            bearing = degrees;
+        }
+        cacheLat = lat;
+        cacheLon = lon;
+        cacheBearing = bearing;
+        cacheMiles = best;
+        cacheValid = true;
+    }
+
+    private static double angleFromNorth(double bearing) {
+        double wrapped = bearing % 360.0;
+        if (wrapped < 0) {
+            wrapped += 360.0;
+        }
+        return Math.min(wrapped, 360.0 - wrapped);
+    }
+
+    private static double miles(double lat1, double lon1, double lat2, double lon2) {
+        double scale = Math.cos(Math.toRadians(lat1)) * EARTH_MILES * Math.PI / 180.0;
+        double north = EARTH_MILES * Math.PI / 180.0;
+        double dx = (lon2 - lon1) * scale;
+        double dy = (lat2 - lat1) * north;
+        return Math.hypot(dx, dy);
     }
 
     private static Segment[] chain(double... latLon) {

@@ -13,6 +13,7 @@ final class CompassWidgets {
     private static final SparseArray<Float> LAST_ROTATION = new SparseArray<>();
     private static final SparseArray<Float> LAST_ALPHA = new SparseArray<>();
     private static final SparseArray<Long> LAST_PUSH = new SparseArray<>();
+    private static final SparseArray<Float> SMOOTHED = new SparseArray<>();
 
     private CompassWidgets() {}
 
@@ -27,6 +28,7 @@ final class CompassWidgets {
             LAST_ROTATION.delete(widgetId);
             LAST_ALPHA.delete(widgetId);
             LAST_PUSH.delete(widgetId);
+            SMOOTHED.delete(widgetId);
         }
     }
 
@@ -37,9 +39,17 @@ final class CompassWidgets {
         WidgetStore store = new WidgetStore(context);
         Location here = CompassService.location();
         boolean headingOk = CompassService.hasHeading();
-        float heading = CompassService.heading();
+        float[] orientation = CompassService.orientation();
+        int displayRotation = displayRotation(context);
+        boolean grid = false;
+        for (int id : ids) {
+            if (WidgetStore.GRID.equals(store.mode(id))) {
+                grid = true;
+                break;
+            }
+        }
         float uptown = Float.NaN;
-        if (here != null) {
+        if (grid && here != null) {
             uptown = Avenues.uptownTrue(here.getLatitude(), here.getLongitude());
         }
         for (int id : ids) {
@@ -48,8 +58,17 @@ final class CompassWidgets {
             float alpha = 0.35f;
             float declination = Declination.east();
             if (headingOk && (!WidgetStore.needsDeclination(mode) || !Float.isNaN(declination))) {
-                rotation = Heading.arrowRotation(heading, mode, declination, uptown);
-                alpha = 1f;
+                float aim = Heading.arrowRotation(orientation, displayRotation, mode, declination, uptown);
+                if (Float.isNaN(aim)) {
+                    if (!full) {
+                        continue;
+                    }
+                } else {
+                    float previous = SMOOTHED.get(id, Float.NaN);
+                    rotation = Heading.smooth(previous, aim);
+                    SMOOTHED.put(id, rotation);
+                    alpha = 1f;
+                }
             }
             if (!full && !shouldPush(id, rotation, alpha)) {
                 continue;
@@ -71,6 +90,14 @@ final class CompassWidgets {
             LAST_ROTATION.put(id, rotation);
             LAST_ALPHA.put(id, alpha);
             LAST_PUSH.put(id, android.os.SystemClock.elapsedRealtime());
+        }
+    }
+
+    private static int displayRotation(Context context) {
+        try {
+            return context.getSystemService(android.view.WindowManager.class).getDefaultDisplay().getRotation();
+        } catch (Exception ignored) {
+            return 0;
         }
     }
 
